@@ -4,73 +4,66 @@
  */
 package org.paseto4j.version4;
 
-import static java.nio.charset.StandardCharsets.UTF_8;
-import static java.util.Base64.getUrlDecoder;
-import static java.util.Objects.requireNonNull;
-import static org.paseto4j.commons.ByteUtils.concat;
-import static org.paseto4j.commons.Purpose.PURPOSE_PUBLIC;
 import static org.paseto4j.commons.Version.V4;
 
 import java.security.SignatureException;
 import java.security.interfaces.EdECPrivateKey;
 import java.security.interfaces.EdECPublicKey;
-import java.util.Arrays;
-import org.paseto4j.commons.*;
+import org.paseto4j.commons.PublicTokenPipeline;
+import org.paseto4j.commons.SignatureScheme;
 
 public class PasetoPublic {
   private PasetoPublic() {}
 
+  private static final SignatureScheme<EdECPrivateKey, EdECPublicKey> SCHEME =
+      new SignatureScheme<>() {
+        @Override
+        public int signatureLength() {
+          return 64;
+        }
+
+        @Override
+        public byte[][] signingPreAuthPieces(
+            EdECPrivateKey privateKey,
+            byte[] header,
+            byte[] message,
+            byte[] footer,
+            byte[] implicitAssertion) {
+          return new byte[][] {header, message, footer, implicitAssertion};
+        }
+
+        @Override
+        public byte[][] verificationPreAuthPieces(
+            EdECPublicKey publicKey,
+            byte[] header,
+            byte[] message,
+            byte[] footer,
+            byte[] implicitAssertion) {
+          return new byte[][] {header, message, footer, implicitAssertion};
+        }
+
+        @Override
+        public byte[] sign(EdECPrivateKey privateKey, byte[] preAuth) {
+          return CryptoFunctions.sign(privateKey, preAuth);
+        }
+
+        @Override
+        public void verify(EdECPublicKey publicKey, byte[] preAuth, byte[] signature)
+            throws SignatureException {
+          if (!CryptoFunctions.verify(publicKey, preAuth, signature)) {
+            throw new SignatureException("Invalid signature");
+          }
+        }
+      };
+
   static String sign(
       EdECPrivateKey privateKey, String payload, String footer, String implicitAssertion) {
-
-    requireNonNull(privateKey);
-    requireNonNull(payload);
-
-    TokenOut token = new TokenOut(V4, PURPOSE_PUBLIC);
-
-    // 3
-    byte[] m2 =
-        PreAuthenticationEncoder.encode(
-            token.header(),
-            payload.getBytes(UTF_8),
-            footer.getBytes(UTF_8),
-            implicitAssertion.getBytes(UTF_8));
-
-    // 4
-    byte[] signature = CryptoFunctions.sign(privateKey, m2);
-
-    return token.payload(concat(payload.getBytes(UTF_8), signature)).footer(footer).doFinal();
+    return PublicTokenPipeline.sign(V4, SCHEME, privateKey, payload, footer, implicitAssertion);
   }
 
   public static String parse(
       EdECPublicKey publicKey, String signedMessage, String footer, String implicitAssertion)
       throws SignatureException {
-    requireNonNull(publicKey);
-    requireNonNull(signedMessage);
-
-    // 1 and 2
-    Token token = new Token(signedMessage, V4, PURPOSE_PUBLIC, footer);
-
-    // 4
-    byte[] sm = getUrlDecoder().decode(token.getPayload());
-    byte[] signature = Arrays.copyOfRange(sm, sm.length - 64, sm.length);
-    byte[] message = Arrays.copyOfRange(sm, 0, sm.length - 64);
-
-    // 5
-    byte[] m2 =
-        PreAuthenticationEncoder.encode(
-            token.header(), message, footer.getBytes(UTF_8), implicitAssertion.getBytes(UTF_8));
-
-    // 6
-    verifySignature(publicKey, m2, signature);
-
-    return new String(message, UTF_8);
-  }
-
-  private static void verifySignature(EdECPublicKey key, byte[] m2, byte[] signature)
-      throws SignatureException {
-    if (!CryptoFunctions.verify(key, m2, signature)) {
-      throw new SignatureException("Invalid signature");
-    }
+    return PublicTokenPipeline.parse(V4, SCHEME, publicKey, signedMessage, footer, implicitAssertion);
   }
 }

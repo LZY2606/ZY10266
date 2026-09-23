@@ -4,23 +4,17 @@
  */
 package org.paseto4j.version2;
 
-import static java.nio.charset.StandardCharsets.UTF_8;
-import static java.util.Objects.requireNonNull;
-import static org.paseto4j.commons.ByteUtils.concat;
-import static org.paseto4j.commons.Purpose.PURPOSE_LOCAL;
+import static org.paseto4j.commons.ByteUtils.wipe;
 import static org.paseto4j.commons.Version.V2;
 
 import com.goterl.lazysodium.LazySodiumJava;
 import com.goterl.lazysodium.SodiumJava;
 import com.goterl.lazysodium.interfaces.AEAD;
 import java.util.Arrays;
-import java.util.Base64;
-
+import org.paseto4j.commons.LocalCipher;
+import org.paseto4j.commons.LocalTokenPipeline;
 import org.paseto4j.commons.PasetoException;
-import org.paseto4j.commons.PreAuthenticationEncoder;
 import org.paseto4j.commons.SecretKey;
-import org.paseto4j.commons.Token;
-import org.paseto4j.commons.TokenOut;
 
 class PasetoLocal {
 
@@ -36,87 +30,108 @@ class PasetoLocal {
 
   private PasetoLocal() {}
 
+  private static final LocalCipher CIPHER = new V2LocalCipher();
+
   static String encrypt(SecretKey key, String payload, String footer) {
     byte[] randomKey = SODIUM.randomBytesBuf(32);
     return encrypt(key, randomKey, payload, footer);
   }
 
   static String encrypt(SecretKey key, byte[] randomKey, String payload, String footer) {
-    requireNonNull(key);
-    requireNonNull(payload);
-
-    TokenOut token = new TokenOut(V2, PURPOSE_LOCAL);
-
-    // 3 - Generate nonce using GenericHash
-    byte[] nonce = new byte[AEAD.XCHACHA20POLY1305_IETF_NPUBBYTES];
-    byte[] payloadBytes = payload.getBytes(UTF_8);
-    SODIUM.cryptoGenericHash(
-        nonce, nonce.length, payloadBytes, payloadBytes.length, randomKey, randomKey.length);
-
-    // 4 - Pre-auth encoding (unchanged)
-    byte[] preAuth = PreAuthenticationEncoder.encode(token.header(), nonce, footer.getBytes(UTF_8));
-
-    // 5 - XChaCha20Poly1305 encryption
-    byte[] cipherText = new byte[payloadBytes.length + AEAD.XCHACHA20POLY1305_IETF_ABYTES];
-    long[] cipherLen = new long[1];
-
-    boolean success =
-        SODIUM.cryptoAeadXChaCha20Poly1305IetfEncrypt(
-            cipherText,
-            cipherLen,
-            payloadBytes,
-            payloadBytes.length,
-            preAuth,
-            preAuth.length,
-            null, // No additional data
-            nonce,
-            key.toBytes());
-
-    if (!success) {
-      throw new PasetoException("Encryption failed");
-    }
-
-    // 6
-    return token.payload(concat(nonce, cipherText)).footer(footer).doFinal();
+    return LocalTokenPipeline.encrypt(V2, CIPHER, key, randomKey, payload, footer, "");
   }
 
   static String decrypt(SecretKey key, String token, String footer) {
-    requireNonNull(key);
-    requireNonNull(token);
+    return LocalTokenPipeline.decrypt(V2, CIPHER, key, token, footer, "");
+  }
 
-    // 1 and 2
-    Token pasetoToken = new Token(token, V2, PURPOSE_LOCAL, footer);
+  /**
+   * Version 2 crypto primitives: XChaCha20-Poly1305 AEAD with PAE(header, nonce, footer) as
+   * additional data. The tag travels inside the AEAD output, so {@link #tagLength()} is 0.
+   */
+  private static final class V2LocalCipher implements LocalCipher {
 
-    // 3
-    byte[] ct = Base64.getUrlDecoder().decode(pasetoToken.getPayload());
-    byte[] nonce = Arrays.copyOfRange(ct, 0, AEAD.XCHACHA20POLY1305_IETF_NPUBBYTES);
-    byte[] encryptedMessage =
-        Arrays.copyOfRange(ct, AEAD.XCHACHA20POLY1305_IETF_NPUBBYTES, ct.length);
-
-    // 4
-    byte[] preAuth =
-        PreAuthenticationEncoder.encode(pasetoToken.header(), nonce, footer.getBytes(UTF_8));
-
-    // 5 - XChaCha20Poly1305 decryption using Lazysodium
-    byte[] message = new byte[encryptedMessage.length - AEAD.XCHACHA20POLY1305_IETF_ABYTES];
-    long[] messageLen = new long[1];
-
-    boolean success =
-        SODIUM.cryptoAeadXChaCha20Poly1305IetfDecrypt(
-            message,
-            messageLen,
-            null, // No additional data
-            encryptedMessage,
-            encryptedMessage.length,
-            preAuth,
-            preAuth.length,
-            nonce,
-            key.toBytes());
-
-    if (!success) {
-      throw new PasetoException("Unable to decrypt the token");
+    @Override
+    public int nonceLength() {
+      return AEAD.XCHACHA20POLY1305_IETF_NPUBBYTES;
     }
 
-    return new String(message, 0, (int) messageLen[0], UTF_8);
+    @Override
+    public int tagLength() {
+      return 0;
+    }
+
+    @Override
+    public byte[] nonce(byte[] payload, byte[] random) {
+      byte[] nonce = new byte[nonceLength()];
+      SODIUM.cryptoGenericHash(nonce, nonce.length, payload, payload.length, random, random.length);
+      return nonce;
+    }
+
+    @Override
+    public byte[][] preAuthPieces(
+        byte[] header, byte[] nonce, byte[] cipherText, byte[] footer, byte[] implicitAssertion) {
+      return new byte[][] {header, nonce, footer};
+    }
+
+    @Override
+    public byte[] encrypt(SecretKey key, byte[] nonce, byte[] payload, byte[] preAuth) {
+      byte[] rawKey = key.toBytes();
+      try {
+        byte[] cipherText = new byte[payload.length + AEAD.XCHACHA20POLY1305_IETF_ABYTES];
+        long[] cipherLen = new long[1];
+        boolean success =
+            SODIUM.cryptoAeadXChaCha20Poly1305IetfEncrypt(
+                cipherText,
+                cipherLen,
+                payload,
+                payload.length,
+                preAuth,
+                preAuth.length,
+                null,
+                nonce,
+                rawKey);
+        if (!success) {
+          throw new PasetoException("Encryption failed");
+        }
+        return cipherText;
+      } finally {
+        wipe(rawKey);
+      }
+    }
+
+    @Override
+    public byte[] tag(SecretKey key, byte[] nonce, byte[] preAuth) {
+      throw new UnsupportedOperationException("v2 authenticates during encryption");
+    }
+
+    @Override
+    public byte[] decrypt(SecretKey key, byte[] nonce, byte[] cipherText, byte[] tag, byte[] preAuth) {
+      if (cipherText.length < AEAD.XCHACHA20POLY1305_IETF_ABYTES) {
+        throw new PasetoException("Unable to decrypt the token");
+      }
+      byte[] rawKey = key.toBytes();
+      try {
+        byte[] message = new byte[cipherText.length - AEAD.XCHACHA20POLY1305_IETF_ABYTES];
+        long[] messageLen = new long[1];
+        boolean success =
+            SODIUM.cryptoAeadXChaCha20Poly1305IetfDecrypt(
+                message,
+                messageLen,
+                null,
+                cipherText,
+                cipherText.length,
+                preAuth,
+                preAuth.length,
+                nonce,
+                rawKey);
+        if (!success) {
+          throw new PasetoException("Unable to decrypt the token");
+        }
+        return Arrays.copyOf(message, (int) messageLen[0]);
+      } finally {
+        wipe(rawKey);
+      }
+    }
   }
 }
