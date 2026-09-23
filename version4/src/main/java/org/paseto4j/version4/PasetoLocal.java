@@ -4,21 +4,11 @@
  */
 package org.paseto4j.version4;
 
-import static java.nio.charset.StandardCharsets.UTF_8;
-import static java.util.Base64.getUrlDecoder;
 import static java.util.Objects.requireNonNull;
-import static org.paseto4j.commons.ByteUtils.concat;
-import static org.paseto4j.commons.ByteUtils.wipe;
 import static org.paseto4j.commons.Conditions.verify;
-import static org.paseto4j.commons.Purpose.PURPOSE_LOCAL;
-import static org.paseto4j.commons.Version.V4;
 
-import java.security.MessageDigest;
-import java.util.Arrays;
-import org.paseto4j.commons.PreAuthenticationEncoder;
+import org.paseto4j.commons.LocalTokenPipeline;
 import org.paseto4j.commons.SecretKey;
-import org.paseto4j.commons.Token;
-import org.paseto4j.commons.TokenOut;
 
 public class PasetoLocal {
   private PasetoLocal() {}
@@ -37,29 +27,7 @@ public class PasetoLocal {
     requireNonNull(payload);
     verify(nonce.length == 32, "nonce should be 32 bytes");
 
-    TokenOut token = new TokenOut(V4, PURPOSE_LOCAL);
-
-    // 4
-    byte[] tmp = encryptionKey(key, nonce);
-    byte[] ek = Arrays.copyOfRange(tmp, 0, 32);
-    byte[] n2 = Arrays.copyOfRange(tmp, 32, 56);
-    byte[] ak = authenticationKey(key, nonce);
-    try {
-      // 5
-      byte[] c = CryptoFunctions.xchacha20(payload.getBytes(UTF_8), n2, ek);
-
-      // 6
-      byte[] preAuth =
-          PreAuthenticationEncoder.encode(
-              token.header(), nonce, c, footer.getBytes(UTF_8), implicitAssertion.getBytes(UTF_8));
-
-      // 7
-      byte[] t = CryptoFunctions.blake2b(32, preAuth, ak);
-
-      return token.payload(concat(nonce, c, t)).footer(footer).doFinal();
-    } finally {
-      wipe(tmp, ek, n2, ak);
-    }
+    return LocalTokenPipeline.encrypt(new V4LocalScheme(key, nonce), payload, footer, implicitAssertion);
   }
 
   /**
@@ -78,62 +46,6 @@ public class PasetoLocal {
     requireNonNull(key);
     requireNonNull(token);
 
-    Token pasetoToken = new Token(token, V4, PURPOSE_LOCAL, footer);
-
-    // 4
-    byte[] nct = getUrlDecoder().decode(pasetoToken.getPayload());
-    byte[] nonce = Arrays.copyOfRange(nct, 0, 32);
-    byte[] t = Arrays.copyOfRange(nct, nct.length - 32, nct.length);
-    byte[] c = Arrays.copyOfRange(nct, 32, nct.length - 32);
-
-    // 5
-    byte[] tmp = encryptionKey(key, nonce);
-    byte[] ek = Arrays.copyOfRange(tmp, 0, 32);
-    byte[] n2 = Arrays.copyOfRange(tmp, 32, 56);
-    byte[] ak = authenticationKey(key, nonce);
-    byte[] message = null;
-    try {
-      // 6
-      byte[] preAuth =
-          PreAuthenticationEncoder.encode(
-              pasetoToken.header(),
-              nonce,
-              c,
-              footer.getBytes(UTF_8),
-              implicitAssertion.getBytes(UTF_8));
-
-      // 7
-      byte[] t2 = CryptoFunctions.blake2b(32, preAuth, ak);
-
-      // 8
-      if (!MessageDigest.isEqual(t, t2)) {
-        throw new IllegalStateException("HMAC verification failed");
-      }
-
-      message = CryptoFunctions.xchacha20(c, n2, ek);
-      return new String(message, UTF_8);
-    } finally {
-      wipe(tmp, ek, n2, ak, message);
-    }
-  }
-
-  private static byte[] encryptionKey(SecretKey key, byte[] nonce) {
-    byte[] rawKey = key.toBytes();
-    try {
-      return CryptoFunctions.blake2b(
-          56, concat("paseto-encryption-key".getBytes(UTF_8), nonce), rawKey);
-    } finally {
-      wipe(rawKey);
-    }
-  }
-
-  private static byte[] authenticationKey(SecretKey key, byte[] nonce) {
-    byte[] rawKey = key.toBytes();
-    try {
-      return CryptoFunctions.blake2b(
-          32, concat("paseto-auth-key-for-aead".getBytes(UTF_8), nonce), rawKey);
-    } finally {
-      wipe(rawKey);
-    }
+    return LocalTokenPipeline.decrypt(new V4LocalScheme(key), token, footer, implicitAssertion);
   }
 }

@@ -4,29 +4,13 @@
  */
 package org.paseto4j.version3;
 
-import static java.nio.charset.StandardCharsets.UTF_8;
-import static java.util.Base64.getUrlDecoder;
 import static java.util.Objects.requireNonNull;
-import static org.paseto4j.commons.ByteUtils.concat;
-import static org.paseto4j.commons.ByteUtils.wipe;
-import static org.paseto4j.commons.Purpose.PURPOSE_LOCAL;
-import static org.paseto4j.commons.Version.V3;
-import static org.paseto4j.version3.CryptoFunctions.decryptAesCtr;
-import static org.paseto4j.version3.CryptoFunctions.encryptAesCtr;
-import static org.paseto4j.version3.CryptoFunctions.hkdfSha384;
-import static org.paseto4j.version3.CryptoFunctions.hmac384;
 import static org.paseto4j.version3.CryptoFunctions.randomBytes;
 
-import java.security.MessageDigest;
 import java.security.Security;
-import java.util.Arrays;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
-import org.paseto4j.commons.ByteUtils;
-import org.paseto4j.commons.Pair;
-import org.paseto4j.commons.PreAuthenticationEncoder;
+import org.paseto4j.commons.LocalTokenPipeline;
 import org.paseto4j.commons.SecretKey;
-import org.paseto4j.commons.Token;
-import org.paseto4j.commons.TokenOut;
 
 class PasetoLocal {
 
@@ -45,49 +29,7 @@ class PasetoLocal {
     requireNonNull(key);
     requireNonNull(payload);
 
-    var token = new TokenOut(V3, PURPOSE_LOCAL);
-
-    // 4
-    byte[] tmp = encryptionKey(key, nonce);
-    Pair<byte[]> split = ByteUtils.split(tmp, 32);
-    byte[] ek = split.getFirst();
-    byte[] n2 = split.getSecond();
-    byte[] ak = authenticationKey(key, nonce);
-    try {
-      // 5
-      byte[] cipherText = encryptAesCtr(ek, n2, payload.getBytes(UTF_8));
-
-      // 6
-      byte[] preAuth =
-          PreAuthenticationEncoder.encode(
-              token.header(), nonce, cipherText, footer.getBytes(UTF_8), implicit.getBytes(UTF_8));
-
-      // 7
-      byte[] t = hmac384(ak, preAuth);
-
-      // 8
-      return token.payload(concat(nonce, cipherText, t)).footer(footer).doFinal();
-    } finally {
-      wipe(tmp, ek, n2, ak);
-    }
-  }
-
-  private static byte[] encryptionKey(SecretKey key, byte[] nonce) {
-    byte[] rawKey = key.toBytes();
-    try {
-      return hkdfSha384(rawKey, concat("paseto-encryption-key".getBytes(UTF_8), nonce));
-    } finally {
-      wipe(rawKey);
-    }
-  }
-
-  private static byte[] authenticationKey(SecretKey key, byte[] nonce) {
-    byte[] rawKey = key.toBytes();
-    try {
-      return hkdfSha384(rawKey, concat("paseto-auth-key-for-aead".getBytes(UTF_8), nonce));
-    } finally {
-      wipe(rawKey);
-    }
+    return LocalTokenPipeline.encrypt(new V3LocalScheme(key, nonce), payload, footer, implicit);
   }
 
   /**
@@ -110,45 +52,6 @@ class PasetoLocal {
     requireNonNull(key);
     requireNonNull(token);
 
-    // 2 and 3
-    var pasetoToken = new Token(token, V3, PURPOSE_LOCAL, footer);
-
-    // 4
-    byte[] ct = getUrlDecoder().decode(pasetoToken.getPayload());
-    byte[] nonce = Arrays.copyOfRange(ct, 0, 32);
-    byte[] t = Arrays.copyOfRange(ct, ct.length - 48, ct.length);
-    byte[] c = Arrays.copyOfRange(ct, 32, ct.length - 48);
-
-    // 5
-    byte[] tmp = encryptionKey(key, nonce);
-    Pair<byte[]> split = ByteUtils.split(tmp, 32);
-    byte[] ek = split.getFirst();
-    byte[] n2 = split.getSecond();
-    byte[] ak = authenticationKey(key, nonce);
-    byte[] message = null;
-    try {
-      // 6
-      byte[] preAuth =
-          PreAuthenticationEncoder.encode(
-              pasetoToken.header(),
-              nonce,
-              c,
-              footer.getBytes(UTF_8),
-              implicitAssertion.getBytes(UTF_8));
-
-      // 7
-      byte[] t2 = hmac384(ak, preAuth);
-
-      // 8
-      if (!MessageDigest.isEqual(t, t2)) {
-        throw new IllegalStateException("HMAC verification failed");
-      }
-
-      // 9
-      message = decryptAesCtr(ek, n2, c);
-      return new String(message, UTF_8);
-    } finally {
-      wipe(tmp, ek, n2, ak, message);
-    }
+    return LocalTokenPipeline.decrypt(new V3LocalScheme(key), token, footer, implicitAssertion);
   }
 }

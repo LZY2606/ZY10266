@@ -41,4 +41,21 @@ class PreAuthenticationEncoderTest {
                 "0100000000000000190000000000000050617261676f6e0a00000000000000496e6974696174697665",
                 HexToBytes.hexEncode(encode("Paragon\n\0\0\0\0\0\0\0Initiative".getBytes(UTF_8)))));
   }
+
+  @Test
+  void explicitSlicesWithEmptyMiddlePiece() {
+    Assertions.assertEquals(
+        "0300000000000000"
+            + "0100000000000000" + "01"
+            + "0000000000000000"
+            + "0200000000000000" + "0203",
+        HexToBytes.hexEncode(encode(new byte[] {1}, new byte[0], new byte[] {2, 3})));
+  }
+
+  @Test
+  void binarySlicesAreLengthPrefixedNotTerminated() {
+    Assertions.assertEquals(
+        "0100000000000000" + "0200000000000000" + "ff00",
+        HexToBytes.hexEncode(encode(new byte[] {(byte) 0xff, 0x00})));
+  }
 }
